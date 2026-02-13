@@ -35,28 +35,42 @@
           </div>
         </div>
       </div>
-      <button class="btn-primary" @click="handleGenerate">
-        生成笔记
+      <button
+        class="btn-primary"
+        :disabled="isProcessing"
+        @click="handleGenerate"
+      >
+        {{ isProcessing ? '处理中...' : '生成笔记' }}
       </button>
     </div>
 
     <!-- 进度条 -->
-    <div v-if="sse.status.value === 'processing'" class="card progress-section">
-      <div class="progress-bar">
-        <div class="progress-fill" :style="{ width: sse.progress.value + '%' }" />
+    <div v-if="step !== 'idle'" class="card progress-section">
+      <div class="step-indicator">
+        <span :class="{ active: step === 'transcribing' }">① 转录</span>
+        <span class="step-arrow">→</span>
+        <span :class="{ active: step === 'generating' }">② 生成笔记</span>
       </div>
-      <p class="progress-text">{{ sse.message.value || '处理中...' }}</p>
+      <div class="progress-bar">
+        <div class="progress-fill" :style="{ width: progress + '%' }" />
+      </div>
+      <p class="progress-text">{{ progressMessage }}</p>
     </div>
 
     <!-- 笔记结果 -->
     <div v-if="noteMarkdown" class="card result-section">
       <div class="result-header">
         <h3>生成结果</h3>
-        <button class="btn-secondary" @click="handleDownload">
+        <button class="btn-secondary" @click="handleDownloadNote">
           下载 Markdown
         </button>
       </div>
       <div class="markdown-body" v-html="renderedNote" />
+    </div>
+
+    <!-- 错误提示 -->
+    <div v-if="errorMsg" class="card error-section">
+      <p>{{ errorMsg }}</p>
     </div>
   </div>
 </template>
@@ -64,14 +78,24 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { marked } from 'marked'
-import { previewVideo } from '@/api'
-import { useSSE } from '@/composables/useSSE'
+import {
+  previewVideo,
+  startTranscription,
+  getTranscriptionResult,
+  generateNote,
+} from '@/api'
 import type { VideoInfo } from '@/types'
 
 const videoUrl = ref('')
 const videoInfo = ref<VideoInfo | null>(null)
 const noteMarkdown = ref('')
-const sse = useSSE()
+const errorMsg = ref('')
+const isProcessing = ref(false)
+
+type Step = 'idle' | 'transcribing' | 'generating'
+const step = ref<Step>('idle')
+const progress = ref(0)
+const progressMessage = ref('')
 
 const renderedNote = computed(() => {
   if (!noteMarkdown.value) return ''
@@ -88,19 +112,96 @@ function formatDuration(seconds: number): string {
 
 async function handlePreview() {
   if (!videoUrl.value) return
+  errorMsg.value = ''
   try {
     videoInfo.value = await previewVideo(videoUrl.value)
-  } catch {
-    // TODO: 错误提示
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '预览失败'
+    errorMsg.value = `预览失败: ${msg}`
   }
 }
 
-function handleGenerate() {
-  // TODO: 调用转录 + 笔记生成 API
-  noteMarkdown.value = '# 笔记生成中...\n\n连接后端后将自动生成笔记内容。'
+function pollSSE(url: string, onProgress: (data: Record<string, unknown>) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(url)
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        onProgress(data)
+        if (data.status === 'completed' || data.status === 'error') {
+          es.close()
+          if (data.status === 'error') {
+            reject(new Error(data.message || '处理失败'))
+          } else {
+            resolve()
+          }
+        }
+      } catch {
+        es.close()
+        reject(new Error('数据解析失败'))
+      }
+    }
+    es.onerror = () => {
+      es.close()
+      reject(new Error('连接中断'))
+    }
+  })
 }
 
-function handleDownload() {
+async function handleGenerate() {
+  if (!videoUrl.value || isProcessing.value) return
+  isProcessing.value = true
+  errorMsg.value = ''
+  noteMarkdown.value = ''
+
+  try {
+    // 步骤 1: 转录
+    step.value = 'transcribing'
+    progress.value = 0
+    progressMessage.value = '正在开始转录...'
+
+    const transcribeResp = await startTranscription(videoUrl.value)
+
+    await pollSSE(`/api/transcribe/progress/${transcribeResp.task_id}`, (data) => {
+      progress.value = (data.progress as number) * 0.5
+      progressMessage.value = data.message as string
+    })
+
+    const transcription = await getTranscriptionResult(transcribeResp.task_id)
+
+    // 步骤 2: 生成笔记
+    step.value = 'generating'
+    progress.value = 50
+    progressMessage.value = 'AI 正在生成笔记...'
+
+    const noteResp = await generateNote(transcription.text)
+
+    await pollSSE(`/api/note/stream/${noteResp.task_id}`, (data) => {
+      if (data.content) {
+        noteMarkdown.value += data.content as string
+      }
+      if (data.status === 'streaming') {
+        progress.value = Math.min(95, progress.value + 1)
+      }
+    })
+
+    progress.value = 100
+    progressMessage.value = '完成!'
+
+    setTimeout(() => {
+      step.value = 'idle'
+    }, 1500)
+
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '处理失败'
+    errorMsg.value = msg
+    step.value = 'idle'
+  } finally {
+    isProcessing.value = false
+  }
+}
+
+function handleDownloadNote() {
   const blob = new Blob([noteMarkdown.value], { type: 'text/markdown' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -162,6 +263,30 @@ function handleDownload() {
 
 .progress-section {
   margin-bottom: $spacing-lg;
+}
+
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  margin-bottom: $spacing-md;
+  font-size: $font-size-sm;
+  color: $text-muted;
+
+  .active {
+    color: $accent-primary;
+    font-weight: 600;
+  }
+}
+
+.step-arrow {
+  color: $text-muted;
+}
+
+.error-section {
+  margin-bottom: $spacing-lg;
+  border-color: $error;
+  color: $error;
 }
 
 .progress-bar {

@@ -13,10 +13,10 @@
       <button
         class="btn-primary"
         style="margin-top: 12px"
-        :disabled="!videoUrl || isPrepared"
+        :disabled="!videoUrl || isPrepared || isPreparing"
         @click="handlePrepare"
       >
-        {{ isPrepared ? '✓ 已就绪' : '预处理视频' }}
+        {{ isPreparing ? '预处理中...' : isPrepared ? '✓ 已就绪' : '预处理视频' }}
       </button>
     </div>
 
@@ -56,33 +56,119 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, nextTick } from 'vue'
+import { startTranscription, getTranscriptionResult } from '@/api'
 import type { QAMessage } from '@/types'
 
 const videoUrl = ref('')
 const question = ref('')
 const isPrepared = ref(false)
+const isPreparing = ref(false)
+const isAsking = ref(false)
+const transcriptionContext = ref('')
 const messages = ref<QAMessage[]>([])
+const chatContainer = ref<HTMLElement>()
 
-function handlePrepare() {
-  // TODO: 调用预处理 API
-  isPrepared.value = true
+function scrollToBottom() {
+  nextTick(() => {
+    if (chatContainer.value) {
+      chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+    }
+  })
 }
 
-function handleAsk() {
-  if (!question.value) return
-  messages.value.push({
-    role: 'user',
-    content: question.value,
-    timestamp: Date.now(),
-  })
-  // TODO: 调用问答 API，流式接收回答
-  messages.value.push({
-    role: 'assistant',
-    content: '连接后端后将自动回答你的问题。',
-    timestamp: Date.now(),
-  })
+async function handlePrepare() {
+  if (!videoUrl.value || isPreparing.value) return
+  isPreparing.value = true
+
+  try {
+    const resp = await startTranscription(videoUrl.value)
+
+    await new Promise<void>((resolve, reject) => {
+      const es = new EventSource(`/api/transcribe/progress/${resp.task_id}`)
+      es.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.status === 'completed') { es.close(); resolve() }
+        if (data.status === 'error') { es.close(); reject(new Error(data.message)) }
+      }
+      es.onerror = () => { es.close(); reject(new Error('连接中断')) }
+    })
+
+    const result = await getTranscriptionResult(resp.task_id)
+    transcriptionContext.value = result.text
+    isPrepared.value = true
+  } catch {
+    messages.value.push({
+      role: 'assistant',
+      content: '预处理失败，请检查视频链接后重试。',
+      timestamp: Date.now(),
+    })
+  } finally {
+    isPreparing.value = false
+  }
+}
+
+async function handleAsk() {
+  if (!question.value || isAsking.value) return
+  const q = question.value
   question.value = ''
+  isAsking.value = true
+
+  messages.value.push({ role: 'user', content: q, timestamp: Date.now() })
+  scrollToBottom()
+
+  const assistantMsg: QAMessage = { role: 'assistant', content: '', timestamp: Date.now() }
+  messages.value.push(assistantMsg)
+
+  try {
+    const es = new EventSource(
+      `/api/qa/ask?${new URLSearchParams({ video_url: videoUrl.value, question: q, context: transcriptionContext.value })}`
+    )
+
+    // SSE 是 GET，但我们的后端是 POST，所以用 fetch + ReadableStream
+    const resp = await fetch('/api/qa/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_url: videoUrl.value,
+        question: q,
+        context: transcriptionContext.value,
+      }),
+    })
+
+    es.close()
+
+    if (!resp.body) throw new Error('无响应')
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const text = decoder.decode(value)
+      const lines = text.split('\n')
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.content) {
+              assistantMsg.content += data.content
+              scrollToBottom()
+            }
+          } catch {
+            // skip
+          }
+        }
+      }
+    }
+  } catch {
+    assistantMsg.content = '回答失败，请重试。'
+  } finally {
+    isAsking.value = false
+    scrollToBottom()
+  }
 }
 </script>
 

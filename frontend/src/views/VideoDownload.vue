@@ -19,8 +19,8 @@
     </div>
 
     <!-- 下载选项 -->
-    <div v-if="showOptions" class="card options-section">
-      <h3 class="section-title">下载选项</h3>
+    <div v-if="videoTitle" class="card options-section">
+      <h3 class="section-title">{{ videoTitle }}</h3>
       <div class="options-grid">
         <div class="option-group">
           <label class="option-label">格式</label>
@@ -40,8 +40,13 @@
           </select>
         </div>
       </div>
-      <button class="btn-primary" style="margin-top: 16px" @click="handleDownload">
-        开始下载
+      <button
+        class="btn-primary"
+        style="margin-top: 16px"
+        :disabled="downloading"
+        @click="handleDownload"
+      >
+        {{ downloading ? '下载中...' : downloadDone ? '✓ 下载完成' : '开始下载' }}
       </button>
     </div>
 
@@ -50,31 +55,78 @@
       <div class="progress-bar">
         <div class="progress-fill" :style="{ width: progress + '%' }" />
       </div>
-      <p class="progress-text">下载中... {{ progress }}%</p>
+      <p class="progress-text">{{ progressMsg }}</p>
+    </div>
+
+    <div v-if="errorMsg" class="card" style="border-color: #ef4444; color: #ef4444;">
+      <p>{{ errorMsg }}</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { previewVideo, startDownload } from '@/api'
 
 const videoUrl = ref('')
-const showOptions = ref(false)
+const videoTitle = ref('')
 const format = ref('mp4')
 const quality = ref('best')
 const downloading = ref(false)
+const downloadDone = ref(false)
 const progress = ref(0)
+const progressMsg = ref('')
+const errorMsg = ref('')
 
-function handlePreview() {
+async function handlePreview() {
   if (!videoUrl.value) return
-  // TODO: 调用预览 API
-  showOptions.value = true
+  errorMsg.value = ''
+  videoTitle.value = ''
+  downloadDone.value = false
+  try {
+    const info = await previewVideo(videoUrl.value)
+    videoTitle.value = info.title
+  } catch {
+    errorMsg.value = '预览失败，请检查链接'
+  }
 }
 
-function handleDownload() {
-  // TODO: 调用下载 API
+async function handleDownload() {
+  if (!videoUrl.value || downloading.value) return
   downloading.value = true
+  downloadDone.value = false
   progress.value = 0
+  progressMsg.value = '准备下载...'
+  errorMsg.value = ''
+
+  try {
+    const resp = await startDownload(videoUrl.value, format.value, quality.value)
+
+    await new Promise<void>((resolve, reject) => {
+      const es = new EventSource(`/api/download/progress/${resp.task_id}`)
+      es.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        progress.value = data.progress
+        progressMsg.value = data.message
+        if (data.status === 'completed') {
+          es.close()
+          resolve()
+        }
+        if (data.status === 'error') {
+          es.close()
+          reject(new Error(data.message))
+        }
+      }
+      es.onerror = () => { es.close(); reject(new Error('连接中断')) }
+    })
+
+    downloadDone.value = true
+    progressMsg.value = '下载完成！文件已保存到服务器 temp 目录'
+  } catch (e: unknown) {
+    errorMsg.value = e instanceof Error ? e.message : '下载失败'
+  } finally {
+    downloading.value = false
+  }
 }
 </script>
 
