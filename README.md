@@ -1,0 +1,2 @@
+# VideoNote
+随笔
