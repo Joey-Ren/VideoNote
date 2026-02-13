@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # YouTube（可选，加速预览）
     youtube_api_key: str = ""
 
+    # yt-dlp
+    cookies_from_browser: str = "chrome"  # 浏览器名: chrome/firefox/edge/safari，留空禁用
+    cookies_file: str = ""  # cookies.txt 路径，优先级高于 cookies_from_browser
+
     # 应用
     app_host: str = "0.0.0.0"
     app_port: int = 8000

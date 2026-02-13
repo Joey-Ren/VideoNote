@@ -33,7 +33,11 @@ async def download_progress(task_id: str) -> StreamingResponse:
         async for progress in download_service.get_progress(task_id):
             yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Content-Type": "text/event-stream; charset=utf-8"},
+    )
 
 
 @router.get("/file/{task_id}")

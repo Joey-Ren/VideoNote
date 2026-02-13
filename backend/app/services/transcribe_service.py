@@ -13,6 +13,7 @@ import yt_dlp
 from app.config import settings
 from app.core.whisper_client import get_whisper_model
 from app.models.schemas import TranscriptionResult, TranscriptionSegment
+from app.utils.ytdlp import build_ydl_opts
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,10 @@ class TranscribeService:
     """音频转录服务"""
 
     def _download_audio_sync(self, url: str, output_dir: str) -> str:
-        """下载视频并提取音频（同步，线程池中运行）"""
         output_path = os.path.join(output_dir, "audio.%(ext)s")
-        ydl_opts = {
+        extra = {
             "format": "bestaudio/best",
             "outtmpl": output_path,
-            "quiet": True,
-            "no_warnings": True,
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
@@ -39,7 +37,8 @@ class TranscribeService:
                 }
             ],
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        opts = build_ydl_opts(url, extra)
+        with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         # 找到生成的 wav 文件

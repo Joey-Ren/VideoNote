@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import yt_dlp
 
 from app.config import settings
+from app.utils.ytdlp import build_ydl_opts
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,8 @@ class DownloadService:
     """视频下载服务"""
 
     def _build_ydl_opts(
-        self, task_id: str, task: dict, output_dir: str, fmt: str, quality: str
+        self, task_id: str, task: dict, url: str, output_dir: str, fmt: str, quality: str
     ) -> dict:
-        """构建 yt-dlp 下载选项"""
         output_path = os.path.join(output_dir, f"{task_id}.%(ext)s")
 
         quality_map = {
@@ -33,16 +33,14 @@ class DownloadService:
             "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]",
         }
 
-        opts: dict = {
+        extra: dict = {
             "outtmpl": output_path,
-            "quiet": True,
-            "no_warnings": True,
             "progress_hooks": [lambda d: self._progress_hook(d, task)],
         }
 
         if fmt == "mp3":
-            opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [
+            extra["format"] = "bestaudio/best"
+            extra["postprocessors"] = [
                 {
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -50,9 +48,9 @@ class DownloadService:
                 }
             ]
         else:
-            opts["format"] = quality_map.get(quality, quality_map["best"])
+            extra["format"] = quality_map.get(quality, quality_map["best"])
 
-        return opts
+        return build_ydl_opts(url, extra)
 
     def _progress_hook(self, d: dict, task: dict) -> None:
         """yt-dlp 下载进度回调"""
@@ -71,7 +69,7 @@ class DownloadService:
         output_dir = os.path.join(settings.temp_dir, "downloads")
         os.makedirs(output_dir, exist_ok=True)
 
-        opts = self._build_ydl_opts(task_id, task, output_dir, fmt, quality)
+        opts = self._build_ydl_opts(task_id, task, url, output_dir, fmt, quality)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])

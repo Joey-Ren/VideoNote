@@ -117,15 +117,10 @@ async function handleAsk() {
   messages.value.push({ role: 'user', content: q, timestamp: Date.now() })
   scrollToBottom()
 
-  const assistantMsg: QAMessage = { role: 'assistant', content: '', timestamp: Date.now() }
-  messages.value.push(assistantMsg)
+  messages.value.push({ role: 'assistant', content: '', timestamp: Date.now() })
+  const assistantIdx = messages.value.length - 1
 
   try {
-    const es = new EventSource(
-      `/api/qa/ask?${new URLSearchParams({ video_url: videoUrl.value, question: q, context: transcriptionContext.value })}`
-    )
-
-    // SSE 是 GET，但我们的后端是 POST，所以用 fetch + ReadableStream
     const resp = await fetch('/api/qa/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -136,8 +131,7 @@ async function handleAsk() {
       }),
     })
 
-    es.close()
-
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     if (!resp.body) throw new Error('无响应')
 
     const reader = resp.body.getReader()
@@ -154,7 +148,10 @@ async function handleAsk() {
           try {
             const data = JSON.parse(line.slice(6))
             if (data.content) {
-              assistantMsg.content += data.content
+              messages.value[assistantIdx] = {
+                ...messages.value[assistantIdx],
+                content: messages.value[assistantIdx].content + data.content,
+              }
               scrollToBottom()
             }
           } catch {
@@ -164,7 +161,10 @@ async function handleAsk() {
       }
     }
   } catch {
-    assistantMsg.content = '回答失败，请重试。'
+    messages.value[assistantIdx] = {
+      ...messages.value[assistantIdx],
+      content: '回答失败，请重试。',
+    }
   } finally {
     isAsking.value = false
     scrollToBottom()

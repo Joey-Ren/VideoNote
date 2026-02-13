@@ -27,4 +27,8 @@ async def ask_question(request: QARequest) -> StreamingResponse:
         except Exception as e:
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Content-Type": "text/event-stream; charset=utf-8"},
+    )
