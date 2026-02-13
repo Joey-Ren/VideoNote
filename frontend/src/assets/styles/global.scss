@@ -1,0 +1,167 @@
+@use 'variables' as *;
+
+// ============================================
+// Reset & Base
+// ============================================
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: $font-family;
+  font-size: $font-size-base;
+  color: $text-primary;
+  background-color: $bg-primary;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+a {
+  color: $accent-primary;
+  text-decoration: none;
+  transition: color $transition-fast;
+
+  &:hover {
+    color: $accent-hover;
+  }
+}
+
+// ============================================
+// Scrollbar
+// ============================================
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: $border-light;
+  border-radius: 3px;
+
+  &:hover {
+    background: $text-muted;
+  }
+}
+
+// ============================================
+// Common Utilities
+// ============================================
+.container {
+  max-width: $content-max-width;
+  margin: 0 auto;
+  padding: 0 $spacing-lg;
+}
+
+.card {
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: $radius-lg;
+  padding: $spacing-lg;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-sm;
+  padding: $spacing-sm $spacing-md;
+  border: none;
+  border-radius: $radius-md;
+  font-size: $font-size-base;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all $transition-fast;
+  white-space: nowrap;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.btn-primary {
+  @extend .btn;
+  background: $accent-primary;
+  color: white;
+
+  &:hover:not(:disabled) {
+    background: $accent-hover;
+  }
+
+  &:active:not(:disabled) {
+    background: $accent-active;
+  }
+}
+
+.btn-secondary {
+  @extend .btn;
+  background: $bg-input;
+  color: $text-primary;
+  border: 1px solid $border-color;
+
+  &:hover:not(:disabled) {
+    background: $bg-hover;
+    border-color: $border-light;
+  }
+}
+
+.input {
+  width: 100%;
+  padding: $spacing-sm $spacing-md;
+  background: $bg-input;
+  border: 1px solid $border-color;
+  border-radius: $radius-md;
+  color: $text-primary;
+  font-size: $font-size-base;
+  font-family: $font-family;
+  outline: none;
+  transition: border-color $transition-fast;
+
+  &::placeholder {
+    color: $text-muted;
+  }
+
+  &:focus {
+    border-color: $accent-primary;
+  }
+}
+
+textarea.input {
+  resize: vertical;
+  min-height: 80px;
+}
+
+// ============================================
+// Page Layout
+// ============================================
+.page {
+  padding: $spacing-xl $spacing-lg;
+  max-width: $content-max-width;
+  margin: 0 auto;
+}
+
+.page-title {
+  font-size: $font-size-xl;
+  font-weight: 700;
+  margin-bottom: $spacing-sm;
+}
+
+.page-desc {
+  color: $text-secondary;
+  font-size: $font-size-base;
+  margin-bottom: $spacing-xl;
+}
