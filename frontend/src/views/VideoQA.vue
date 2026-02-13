@@ -32,7 +32,17 @@
           class="chat-message"
           :class="'chat-message--' + msg.role"
         >
-          <div class="chat-bubble">{{ msg.content }}</div>
+          <div class="chat-bubble">
+            {{ msg.content }}
+            <button
+              v-if="msg.role === 'assistant' && msg.content"
+              class="voice-play-btn"
+              :title="isSpeaking ? '停止播放' : '语音播放'"
+              @click="toggleSpeak(msg.content)"
+            >
+              {{ isSpeaking ? '⏹' : '🔊' }}
+            </button>
+          </div>
         </div>
       </div>
       <div class="chat-input">
@@ -44,6 +54,16 @@
           @keydown.enter="handleAsk"
         />
         <button
+          class="voice-btn"
+          :class="{ 'voice-btn--active': isListening }"
+          :disabled="!isPrepared"
+          :title="isListening ? '停止录音' : '语音输入'"
+          @click="toggleVoice"
+        >
+          <span class="voice-icon">{{ isListening ? '⏹' : '🎤' }}</span>
+          <span v-if="isListening" class="voice-pulse" />
+        </button>
+        <button
           class="btn-primary"
           :disabled="!question || !isPrepared"
           @click="handleAsk"
@@ -51,12 +71,13 @@
           发送
         </button>
       </div>
+      <div v-if="voiceStatus" class="voice-status">{{ voiceStatus }}</div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onBeforeUnmount } from 'vue'
 import { startTranscription, getTranscriptionResult } from '@/api'
 import type { QAMessage } from '@/types'
 
@@ -65,9 +86,16 @@ const question = ref('')
 const isPrepared = ref(false)
 const isPreparing = ref(false)
 const isAsking = ref(false)
+const isListening = ref(false)
+const isSpeaking = ref(false)
+const voiceStatus = ref('')
+const autoSpeak = ref(true)
 const transcriptionContext = ref('')
 const messages = ref<QAMessage[]>([])
 const chatContainer = ref<HTMLElement>()
+
+let recognition: SpeechRecognition | null = null
+let speechUtterance: SpeechSynthesisUtterance | null = null
 
 function scrollToBottom() {
   nextTick(() => {
@@ -76,6 +104,100 @@ function scrollToBottom() {
     }
   })
 }
+
+// ========== 语音输入 (STT) ==========
+
+function initRecognition(): SpeechRecognition | null {
+  const SpeechRecognition = window.SpeechRecognition || (window as any).webkitSpeechRecognition
+  if (!SpeechRecognition) {
+    voiceStatus.value = '当前浏览器不支持语音识别，请使用 Chrome'
+    return null
+  }
+
+  const r = new SpeechRecognition()
+  r.lang = 'zh-CN'
+  r.continuous = false
+  r.interimResults = true
+
+  r.onresult = (event: SpeechRecognitionEvent) => {
+    let transcript = ''
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript
+    }
+    question.value = transcript
+    if (event.results[event.results.length - 1].isFinal) {
+      voiceStatus.value = ''
+      isListening.value = false
+      if (question.value.trim()) {
+        handleAsk()
+      }
+    }
+  }
+
+  r.onerror = (event: SpeechRecognitionErrorEvent) => {
+    isListening.value = false
+    if (event.error === 'no-speech') {
+      voiceStatus.value = '未检测到语音，请重试'
+    } else if (event.error === 'not-allowed') {
+      voiceStatus.value = '麦克风权限被拒绝，请在浏览器设置中允许'
+    } else {
+      voiceStatus.value = `识别失败: ${event.error}`
+    }
+    setTimeout(() => { voiceStatus.value = '' }, 3000)
+  }
+
+  r.onend = () => {
+    isListening.value = false
+  }
+
+  return r
+}
+
+function toggleVoice() {
+  if (isListening.value) {
+    recognition?.stop()
+    isListening.value = false
+    voiceStatus.value = ''
+    return
+  }
+
+  if (!recognition) {
+    recognition = initRecognition()
+  }
+  if (!recognition) return
+
+  voiceStatus.value = '正在聆听...'
+  isListening.value = true
+  recognition.start()
+}
+
+// ========== 语音播报 (TTS) ==========
+
+function speak(text: string) {
+  stopSpeak()
+  speechUtterance = new SpeechSynthesisUtterance(text)
+  speechUtterance.lang = 'zh-CN'
+  speechUtterance.rate = 1.1
+  speechUtterance.onstart = () => { isSpeaking.value = true }
+  speechUtterance.onend = () => { isSpeaking.value = false }
+  speechUtterance.onerror = () => { isSpeaking.value = false }
+  speechSynthesis.speak(speechUtterance)
+}
+
+function stopSpeak() {
+  speechSynthesis.cancel()
+  isSpeaking.value = false
+}
+
+function toggleSpeak(text: string) {
+  if (isSpeaking.value) {
+    stopSpeak()
+  } else {
+    speak(text)
+  }
+}
+
+// ========== 预处理 ==========
 
 async function handlePrepare() {
   if (!videoUrl.value || isPreparing.value) return
@@ -107,6 +229,8 @@ async function handlePrepare() {
     isPreparing.value = false
   }
 }
+
+// ========== 问答 ==========
 
 async function handleAsk() {
   if (!question.value || isAsking.value) return
@@ -160,6 +284,10 @@ async function handleAsk() {
         }
       }
     }
+
+    if (autoSpeak.value && messages.value[assistantIdx].content) {
+      speak(messages.value[assistantIdx].content)
+    }
   } catch {
     messages.value[assistantIdx] = {
       ...messages.value[assistantIdx],
@@ -170,6 +298,11 @@ async function handleAsk() {
     scrollToBottom()
   }
 }
+
+onBeforeUnmount(() => {
+  recognition?.stop()
+  stopSpeak()
+})
 </script>
 
 <style scoped lang="scss">
@@ -215,6 +348,7 @@ async function handleAsk() {
   padding: $spacing-sm $spacing-md;
   border-radius: $radius-lg;
   line-height: 1.6;
+  position: relative;
 
   .chat-message--user & {
     background: $accent-primary;
@@ -229,10 +363,88 @@ async function handleAsk() {
   }
 }
 
+.voice-play-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  margin-left: 6px;
+  opacity: 0.5;
+  transition: opacity $transition-fast;
+  vertical-align: middle;
+
+  &:hover {
+    opacity: 1;
+  }
+}
+
 .chat-input {
   display: flex;
   gap: $spacing-md;
   padding-top: $spacing-md;
   border-top: 1px solid $border-color;
+}
+
+.voice-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid $border-light;
+  background: $bg-input;
+  cursor: pointer;
+  position: relative;
+  transition: all $transition-fast;
+
+  &:hover:not(:disabled) {
+    border-color: $accent-primary;
+    background: $bg-hover;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  &--active {
+    border-color: $error;
+    background: rgba($error, 0.1);
+    animation: voice-glow 1.5s ease-in-out infinite;
+  }
+}
+
+.voice-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.voice-pulse {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid $error;
+  animation: voice-ripple 1.5s ease-out infinite;
+  pointer-events: none;
+}
+
+.voice-status {
+  padding-top: $spacing-sm;
+  font-size: $font-size-xs;
+  color: $text-muted;
+  text-align: center;
+}
+
+@keyframes voice-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba($error, 0.3); }
+  50% { box-shadow: 0 0 12px 4px rgba($error, 0.2); }
+}
+
+@keyframes voice-ripple {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(1.4); opacity: 0; }
 }
 </style>
