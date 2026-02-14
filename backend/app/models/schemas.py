@@ -31,8 +31,12 @@ class QARequest(BaseModel):
     context: str | None = None
 
 
+class TTSRequest(BaseModel):
+    text: str
+    speed: float | None = None
+
+
 class DownloadRequest(BaseModel):
-    """视频下载请求"""
     url: str
     format: str = "mp4"
     quality: str = "best"

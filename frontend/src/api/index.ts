@@ -86,4 +86,27 @@ export async function startDownload(
   return data
 }
 
+/** TTS 语音合成 — 返回 mp3 Blob */
+export async function synthesizeSpeech(
+  text: string,
+  speed?: number,
+): Promise<Blob> {
+  const { data } = await api.post('/tts/speak', { text, speed }, {
+    responseType: 'blob',
+    timeout: 60000,
+  })
+  return data
+}
+
+/** STT 语音识别 — 发送音频，返回文本 */
+export async function transcribeAudio(audioBlob: Blob): Promise<string> {
+  const formData = new FormData()
+  formData.append('file', audioBlob, 'audio.webm')
+  const { data } = await api.post('/stt/transcribe', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 30000,
+  })
+  return data.text
+}
+
 export default api

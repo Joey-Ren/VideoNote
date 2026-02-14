@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o"
 
+    # TTS (ChatTTS — 速度最快，音质好)
+    tts_model: str = "ChatTTS"
+    tts_speed: float = 1.0  # 0.25 ~ 4.0
+
+    # STT (SenseVoice)
+    stt_model: str = "SenseVoice"
+
     # Whisper
     whisper_model_size: str = "base"
 

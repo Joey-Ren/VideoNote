@@ -55,12 +55,15 @@
         />
         <button
           class="voice-btn"
-          :class="{ 'voice-btn--active': isListening }"
+          :class="{
+            'voice-btn--active': isListening,
+            'voice-btn--chat-mode': voiceChatMode,
+          }"
           :disabled="!isPrepared"
-          :title="isListening ? '停止录音' : '语音输入'"
-          @click="toggleVoice"
+          :title="voiceChatMode ? (isSpeaking ? '打断并说话' : '结束语音对话') : '开始语音对话'"
+          @click="toggleVoiceChat"
         >
-          <span class="voice-icon">{{ isListening ? '⏹' : '🎤' }}</span>
+          <span class="voice-icon">{{ !voiceChatMode ? '🎤' : (isSpeaking ? '🎤' : '⏹') }}</span>
           <span v-if="isListening" class="voice-pulse" />
         </button>
         <button
@@ -71,14 +74,22 @@
           发送
         </button>
       </div>
-      <div v-if="voiceStatus" class="voice-status">{{ voiceStatus }}</div>
+      <div v-if="voiceChatMode || voiceStatus" class="voice-status">
+        <span v-if="voiceChatMode && !voiceStatus" class="voice-mode-label">语音对话中 · 点🎤打断 · 说"结束"退出</span>
+        <span v-else>{{ voiceStatus }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, nextTick, onBeforeUnmount } from 'vue'
-import { startTranscription, getTranscriptionResult } from '@/api'
+import {
+  startTranscription,
+  getTranscriptionResult,
+  synthesizeSpeech,
+  transcribeAudio,
+} from '@/api'
 import type { QAMessage } from '@/types'
 
 const videoUrl = ref('')
@@ -89,13 +100,23 @@ const isAsking = ref(false)
 const isListening = ref(false)
 const isSpeaking = ref(false)
 const voiceStatus = ref('')
-const autoSpeak = ref(true)
+const voiceChatMode = ref(false)
 const transcriptionContext = ref('')
 const messages = ref<QAMessage[]>([])
 const chatContainer = ref<HTMLElement>()
 
-let recognition: SpeechRecognition | null = null
-let speechUtterance: SpeechSynthesisUtterance | null = null
+let mediaRecorder: MediaRecorder | null = null
+let audioChunks: Blob[] = []
+let currentAudio: HTMLAudioElement | null = null
+let audioContext: AudioContext | null = null
+let silenceCheckId = 0
+let speakResolve: (() => void) | null = null
+let vadStream: MediaStream | null = null
+let vadContext: AudioContext | null = null
+let vadCheckId = 0
+let interrupted = false
+let ttsPlaying = false
+let sseAbortController: AbortController | null = null
 
 function scrollToBottom() {
   nextTick(() => {
@@ -105,96 +126,321 @@ function scrollToBottom() {
   })
 }
 
-// ========== 语音输入 (STT) ==========
+// ========== 录音 + SenseVoice STT ==========
 
-function initRecognition(): SpeechRecognition | null {
-  const SpeechRecognition = window.SpeechRecognition || (window as any).webkitSpeechRecognition
-  if (!SpeechRecognition) {
-    voiceStatus.value = '当前浏览器不支持语音识别，请使用 Chrome'
-    return null
-  }
+const SILENCE_THRESHOLD = 15
+const SILENCE_DURATION = 2000
 
-  const r = new SpeechRecognition()
-  r.lang = 'zh-CN'
-  r.continuous = false
-  r.interimResults = true
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+    audioChunks = []
 
-  r.onresult = (event: SpeechRecognitionEvent) => {
-    let transcript = ''
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      transcript += event.results[i][0].transcript
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data)
     }
-    question.value = transcript
-    if (event.results[event.results.length - 1].isFinal) {
-      voiceStatus.value = ''
+
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop())
+      cleanupAudioContext()
+
+      const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
+      if (audioBlob.size < 1000) {
+        if (voiceChatMode.value) {
+          setTimeout(() => startListening(), 1000)
+        }
+        return
+      }
+
+      voiceStatus.value = '识别中...'
       isListening.value = false
-      if (question.value.trim()) {
+
+      try {
+        const text = await transcribeAudio(audioBlob)
+        if (!text.trim()) {
+          voiceStatus.value = '未检测到语音'
+          setTimeout(() => { voiceStatus.value = '' }, 2000)
+          if (voiceChatMode.value) {
+            setTimeout(() => startListening(), 1500)
+          }
+          return
+        }
+
+        const exitKeywords = ['结束对话', '退出', '结束']
+        if (exitKeywords.some((kw) => text.includes(kw))) {
+          exitVoiceChat()
+          return
+        }
+
+        question.value = text
+        voiceStatus.value = ''
         handleAsk()
+      } catch {
+        voiceStatus.value = '识别失败，请重试'
+        setTimeout(() => { voiceStatus.value = '' }, 2000)
+        if (voiceChatMode.value) {
+          setTimeout(() => startListening(), 2000)
+        }
       }
     }
-  }
 
-  r.onerror = (event: SpeechRecognitionErrorEvent) => {
+    mediaRecorder.start()
+    setupSilenceDetection(stream)
+  } catch {
+    voiceStatus.value = '麦克风权限被拒绝'
     isListening.value = false
-    if (event.error === 'no-speech') {
-      voiceStatus.value = '未检测到语音，请重试'
-    } else if (event.error === 'not-allowed') {
-      voiceStatus.value = '麦克风权限被拒绝，请在浏览器设置中允许'
-    } else {
-      voiceStatus.value = `识别失败: ${event.error}`
-    }
+    voiceChatMode.value = false
     setTimeout(() => { voiceStatus.value = '' }, 3000)
   }
-
-  r.onend = () => {
-    isListening.value = false
-  }
-
-  return r
 }
 
-function toggleVoice() {
-  if (isListening.value) {
-    recognition?.stop()
-    isListening.value = false
-    voiceStatus.value = ''
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop()
+  }
+}
+
+function setupSilenceDetection(stream: MediaStream) {
+  audioContext = new AudioContext()
+  const analyser = audioContext.createAnalyser()
+  const source = audioContext.createMediaStreamSource(stream)
+  source.connect(analyser)
+  analyser.fftSize = 512
+
+  const dataArray = new Uint8Array(analyser.frequencyBinCount)
+  let lastSoundTime = Date.now()
+  const checkId = ++silenceCheckId
+
+  const checkSilence = () => {
+    if (checkId !== silenceCheckId || !isListening.value) return
+    analyser.getByteFrequencyData(dataArray)
+    const volume = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
+
+    if (volume > SILENCE_THRESHOLD) {
+      lastSoundTime = Date.now()
+    } else if (Date.now() - lastSoundTime > SILENCE_DURATION) {
+      stopRecording()
+      return
+    }
+
+    requestAnimationFrame(checkSilence)
+  }
+
+  setTimeout(checkSilence, 500)
+}
+
+function cleanupAudioContext() {
+  silenceCheckId++
+  if (audioContext) {
+    audioContext.close().catch(() => {})
+    audioContext = null
+  }
+}
+
+// ========== TTS 预合成 + 播放队列 ==========
+
+let audioQueue: Promise<Blob | null>[] = []
+
+function enqueueTTS(sentence: string) {
+  if (interrupted) return
+  const blobPromise = synthesizeSpeech(sentence).catch(() => null)
+  audioQueue.push(blobPromise)
+  if (!ttsPlaying) {
+    playNextInQueue()
+  }
+}
+
+async function playNextInQueue() {
+  if (interrupted || audioQueue.length === 0) {
+    ttsPlaying = false
+    if (!interrupted && voiceChatMode.value && !isAsking.value) {
+      stopVAD()
+      startListening()
+    }
     return
   }
 
-  if (!recognition) {
-    recognition = initRecognition()
-  }
-  if (!recognition) return
+  ttsPlaying = true
+  const blobPromise = audioQueue.shift()!
+  const blob = await blobPromise
 
-  voiceStatus.value = '正在聆听...'
-  isListening.value = true
-  recognition.start()
+  if (interrupted || !blob) {
+    playNextInQueue()
+    return
+  }
+
+  await playBlob(blob)
+
+  if (!interrupted) {
+    playNextInQueue()
+  }
 }
 
-// ========== 语音播报 (TTS) ==========
-
-function speak(text: string) {
+function interruptAll() {
+  interrupted = true
+  audioQueue = []
+  ttsPlaying = false
+  if (sseAbortController) {
+    sseAbortController.abort()
+    sseAbortController = null
+  }
   stopSpeak()
-  speechUtterance = new SpeechSynthesisUtterance(text)
-  speechUtterance.lang = 'zh-CN'
-  speechUtterance.rate = 1.1
-  speechUtterance.onstart = () => { isSpeaking.value = true }
-  speechUtterance.onend = () => { isSpeaking.value = false }
-  speechUtterance.onerror = () => { isSpeaking.value = false }
-  speechSynthesis.speak(speechUtterance)
+}
+
+async function playBlob(blob: Blob): Promise<void> {
+  const url = URL.createObjectURL(blob)
+  currentAudio = new Audio(url)
+  voiceStatus.value = '🔊 正在播放...'
+  isSpeaking.value = true
+
+  return new Promise<void>((resolve) => {
+    speakResolve = resolve
+
+    const cleanup = () => {
+      isSpeaking.value = false
+      URL.revokeObjectURL(url)
+      if (!ttsPlaying) voiceStatus.value = ''
+      currentAudio = null
+      speakResolve = null
+      resolve()
+    }
+
+    currentAudio!.onended = () => cleanup()
+    currentAudio!.onerror = () => cleanup()
+
+    currentAudio!.play().then(() => {
+      if (voiceChatMode.value && !interrupted) {
+        startVAD()
+      }
+    }).catch(() => cleanup())
+  })
+}
+
+async function speak(text: string): Promise<void> {
+  if (interrupted) return
+  try {
+    const blob = await synthesizeSpeech(text)
+    if (interrupted) return
+    await playBlob(blob)
+  } catch {
+    isSpeaking.value = false
+    voiceStatus.value = ''
+    speakResolve = null
+  }
 }
 
 function stopSpeak() {
-  speechSynthesis.cancel()
+  stopVAD()
+  if (currentAudio) {
+    currentAudio.onended = null
+    currentAudio.onerror = null
+    currentAudio.pause()
+    currentAudio.src = ''
+    currentAudio = null
+  }
   isSpeaking.value = false
+  if (speakResolve) {
+    speakResolve()
+    speakResolve = null
+  }
+}
+
+const VAD_THRESHOLD = 30
+const VAD_CONFIRM_MS = 300
+async function startVAD() {
+  try {
+    vadStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    vadContext = new AudioContext()
+    const analyser = vadContext.createAnalyser()
+    const source = vadContext.createMediaStreamSource(vadStream)
+    source.connect(analyser)
+    analyser.fftSize = 512
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount)
+    let voiceStartTime = 0
+    const checkId = ++vadCheckId
+
+    const detectVoice = () => {
+      if (checkId !== vadCheckId || !isSpeaking.value) return
+      analyser.getByteFrequencyData(dataArray)
+      const volume = dataArray.reduce((a, b) => a + b, 0) / dataArray.length
+
+      if (volume > VAD_THRESHOLD) {
+        if (voiceStartTime === 0) voiceStartTime = Date.now()
+        if (Date.now() - voiceStartTime > VAD_CONFIRM_MS) {
+          interruptAll()
+          startListening()
+          return
+        }
+      } else {
+        voiceStartTime = 0
+      }
+
+      requestAnimationFrame(detectVoice)
+    }
+
+    requestAnimationFrame(detectVoice)
+  } catch {
+    // 麦克风不可用，降级为手动打断
+  }
+}
+
+function stopVAD() {
+  vadCheckId++
+  if (vadStream) {
+    vadStream.getTracks().forEach((t) => t.stop())
+    vadStream = null
+  }
+  if (vadContext) {
+    vadContext.close().catch(() => {})
+    vadContext = null
+  }
 }
 
 function toggleSpeak(text: string) {
-  if (isSpeaking.value) {
-    stopSpeak()
+  if (isSpeaking.value || ttsPlaying) {
+    interruptAll()
   } else {
+    interrupted = false
     speak(text)
   }
+}
+
+// ========== 连续对话模式 ==========
+
+function startListening() {
+  if (!voiceChatMode.value) return
+  isListening.value = true
+  voiceStatus.value = '🎤 正在聆听...'
+  startRecording()
+}
+
+function toggleVoiceChat() {
+  if (voiceChatMode.value) {
+    if (isSpeaking.value || isAsking.value) {
+      interruptAll()
+      startListening()
+    } else {
+      exitVoiceChat()
+    }
+  } else {
+    enterVoiceChat()
+  }
+}
+
+function enterVoiceChat() {
+  voiceChatMode.value = true
+  startListening()
+}
+
+function exitVoiceChat() {
+  voiceChatMode.value = false
+  isListening.value = false
+  voiceStatus.value = ''
+  interruptAll()
+  stopRecording()
+  cleanupAudioContext()
 }
 
 // ========== 预处理 ==========
@@ -232,19 +478,30 @@ async function handlePrepare() {
 
 // ========== 问答 ==========
 
+const SENTENCE_DELIMITERS = /([。！？\n.!?])/
+
 async function handleAsk() {
   if (!question.value || isAsking.value) return
   const q = question.value
   question.value = ''
   isAsking.value = true
+  interruptAll()
+  interrupted = false
+
+  if (voiceChatMode.value) {
+    voiceStatus.value = '🤖 AI 思考中...'
+  }
 
   messages.value.push({ role: 'user', content: q, timestamp: Date.now() })
   scrollToBottom()
 
   messages.value.push({ role: 'assistant', content: '', timestamp: Date.now() })
-  const assistantIdx = messages.value.length - 1
+  const assistantMsg = messages.value[messages.value.length - 1] as QAMessage
+
+  let sentenceBuffer = ''
 
   try {
+    sseAbortController = new AbortController()
     const resp = await fetch('/api/qa/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -253,6 +510,7 @@ async function handleAsk() {
         question: q,
         context: transcriptionContext.value,
       }),
+      signal: sseAbortController.signal,
     })
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -262,6 +520,7 @@ async function handleAsk() {
     const decoder = new TextDecoder()
 
     while (true) {
+      if (interrupted) break
       const { done, value } = await reader.read()
       if (done) break
 
@@ -272,36 +531,53 @@ async function handleAsk() {
           try {
             const data = JSON.parse(line.slice(6))
             if (data.content) {
-              messages.value[assistantIdx] = {
-                ...messages.value[assistantIdx],
-                content: messages.value[assistantIdx].content + data.content,
-              }
+              assistantMsg.content += data.content
               scrollToBottom()
+
+              if (voiceChatMode.value && !interrupted) {
+                sentenceBuffer += data.content
+                const parts = sentenceBuffer.split(SENTENCE_DELIMITERS)
+                while (parts.length >= 3) {
+                  const sentence = parts.shift()! + parts.shift()!
+                  if (sentence.trim()) {
+                    enqueueTTS(sentence.trim())
+                  }
+                }
+                sentenceBuffer = parts.join('')
+              }
             }
           } catch {
-            // skip
+            // skip malformed SSE
           }
         }
       }
     }
 
-    if (autoSpeak.value && messages.value[assistantIdx].content) {
-      speak(messages.value[assistantIdx].content)
+    sseAbortController = null
+
+    if (!interrupted && voiceChatMode.value && sentenceBuffer.trim()) {
+      enqueueTTS(sentenceBuffer.trim())
     }
-  } catch {
-    messages.value[assistantIdx] = {
-      ...messages.value[assistantIdx],
-      content: '回答失败，请重试。',
+
+    if (!interrupted && !voiceChatMode.value && assistantMsg.content) {
+      speak(assistantMsg.content)
+    }
+  } catch (e) {
+    if (!interrupted) {
+      assistantMsg.content = assistantMsg.content || '回答失败，请重试。'
+      if (voiceChatMode.value) {
+        setTimeout(() => startListening(), 2000)
+      }
     }
   } finally {
     isAsking.value = false
+    sseAbortController = null
     scrollToBottom()
   }
 }
 
 onBeforeUnmount(() => {
-  recognition?.stop()
-  stopSpeak()
+  exitVoiceChat()
 })
 </script>
 
@@ -398,7 +674,7 @@ onBeforeUnmount(() => {
   background: $bg-input;
   cursor: pointer;
   position: relative;
-  transition: all $transition-fast;
+  transition: all $transition-base;
 
   &:hover:not(:disabled) {
     border-color: $accent-primary;
@@ -415,6 +691,24 @@ onBeforeUnmount(() => {
     background: rgba($error, 0.1);
     animation: voice-glow 1.5s ease-in-out infinite;
   }
+
+  &--chat-mode {
+    width: 56px;
+    min-width: 56px;
+    height: 56px;
+    background: $accent-primary;
+    border-color: $accent-primary;
+
+    .voice-icon {
+      font-size: 22px;
+      color: white;
+    }
+
+    &:hover:not(:disabled) {
+      background: $accent-hover;
+      border-color: $accent-hover;
+    }
+  }
 }
 
 .voice-icon {
@@ -429,6 +723,10 @@ onBeforeUnmount(() => {
   border: 2px solid $error;
   animation: voice-ripple 1.5s ease-out infinite;
   pointer-events: none;
+
+  .voice-btn--chat-mode & {
+    border-color: $accent-primary;
+  }
 }
 
 .voice-status {
@@ -436,6 +734,11 @@ onBeforeUnmount(() => {
   font-size: $font-size-xs;
   color: $text-muted;
   text-align: center;
+}
+
+.voice-mode-label {
+  color: $accent-primary;
+  font-weight: 500;
 }
 
 @keyframes voice-glow {

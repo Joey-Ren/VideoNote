@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import video, transcribe, note, qa, download, settings
+from app.routers import video, transcribe, note, qa, download, settings, tts, stt
 
 
 @asynccontextmanager
@@ -42,6 +42,8 @@ app.include_router(note.router, prefix="/api/note", tags=["笔记"])
 app.include_router(qa.router, prefix="/api/qa", tags=["问答"])
 app.include_router(download.router, prefix="/api/download", tags=["下载"])
 app.include_router(settings.router, prefix="/api/settings", tags=["设置"])
+app.include_router(tts.router, prefix="/api/tts", tags=["语音合成"])
+app.include_router(stt.router, prefix="/api/stt", tags=["语音识别"])
 
 
 @app.get("/api/health")
